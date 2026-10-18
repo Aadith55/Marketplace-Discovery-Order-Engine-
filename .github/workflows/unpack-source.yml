@@ -87,23 +87,23 @@ jobs:
           # FastAPI's lifespan API replaces add_event_handler in current releases.
           main_file = Path("marketplace/main.py")
           main_source = main_file.read_text(encoding="utf-8")
-          deprecated = '    app.add_event_handler("shutdown", engine.dispose)\\n'
+          deprecated = '    app.add_event_handler("shutdown", engine.dispose)\n'
           if deprecated in main_source:
               main_source = main_source.replace(
                   "from decimal import Decimal",
-                  "from contextlib import asynccontextmanager\\nfrom decimal import Decimal",
+                  "from contextlib import asynccontextmanager\nfrom decimal import Decimal",
                   1,
               )
               main_source = main_source.replace(
-                  "    app = FastAPI(\\n",
-                  "    @asynccontextmanager\\n"
-                  "    async def lifespan(_app):\\n"
-                  "        try:\\n"
-                  "            yield\\n"
-                  "        finally:\\n"
-                  "            engine.dispose()\\n\\n"
-                  "    app = FastAPI(\\n"
-                  "        lifespan=lifespan,\\n",
+                  "    app = FastAPI(\n",
+                  "    @asynccontextmanager\n"
+                  "    async def lifespan(_app):\n"
+                  "        try:\n"
+                  "            yield\n"
+                  "        finally:\n"
+                  "            engine.dispose()\n\n"
+                  "    app = FastAPI(\n"
+                  "        lifespan=lifespan,\n",
                   1,
               )
               main_source = main_source.replace(deprecated, "", 1)
