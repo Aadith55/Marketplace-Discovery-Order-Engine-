@@ -151,17 +151,20 @@ def test_configured_admin_token_protects_listing_mutation_and_order_reads(tmp_pa
 def test_production_mode_fails_closed_without_admin_token(tmp_path, monkeypatch):
     monkeypatch.setenv('APP_ENV', 'production')
     monkeypatch.delenv('ADMIN_API_TOKEN', raising=False)
+    import pytest
     with pytest.raises(RuntimeError, match='ADMIN_API_TOKEN must be configured'):
         create_app(f"sqlite:///{tmp_path / 'production.db'}")
 
 
 def test_concurrent_checkouts_never_oversell_inventory(client):
     p = listing(client, title="Limited Stock Item", qty=3, price="10.00")
+
     def buy(index):
         return client.post(
             '/orders', headers={'Idempotency-Key': f'concurrent-order-{index:04d}'},
             json={'items': [{'listing_id': p['id'], 'quantity': 1}]},
         )
+
     with ThreadPoolExecutor(max_workers=8) as pool:
         responses = list(pool.map(buy, range(8)))
     assert all(response.status_code in {201, 409, 503} for response in responses)
@@ -180,13 +183,16 @@ def test_oversized_request_body_rejected_before_json_parsing(client):
 def test_production_mode_rejects_short_admin_token(tmp_path, monkeypatch):
     monkeypatch.setenv('APP_ENV', 'production')
     monkeypatch.setenv('ADMIN_API_TOKEN', 'too-short')
+    import pytest
     with pytest.raises(RuntimeError, match='at least 32 characters'):
         create_app(f"sqlite:///{tmp_path / 'weak-token.db'}")
+
 
 
 def test_oversized_chunked_body_rejected_without_content_length():
     import asyncio
     from marketplace.middleware import RequestSizeLimitMiddleware
+
     chunks = iter([
         {"type": "http.request", "body": b"a" * 600_000, "more_body": True},
         {"type": "http.request", "body": b"b" * 500_000, "more_body": True},
@@ -194,13 +200,17 @@ def test_oversized_chunked_body_rejected_without_content_length():
     ])
     messages = []
     app_called = False
+
     async def receive():
         return next(chunks)
+
     async def send(message):
         messages.append(message)
+
     async def inner_app(scope, receive, send):
         nonlocal app_called
         app_called = True
+
     middleware = RequestSizeLimitMiddleware(inner_app, max_bytes=1_048_576)
     scope = {"type": "http", "http_version": "1.1", "headers": [], "method": "POST", "path": "/test"}
     asyncio.run(middleware(scope, receive, send))
@@ -212,6 +222,7 @@ def test_oversized_chunked_body_rejected_without_content_length():
 def test_invalid_content_length_returns_bad_request():
     import asyncio
     from marketplace.middleware import RequestSizeLimitMiddleware
+
     messages = []
     async def receive():
         raise AssertionError("body should not be read for invalid Content-Length")
@@ -219,20 +230,27 @@ def test_invalid_content_length_returns_bad_request():
         messages.append(message)
     async def inner_app(scope, receive, send):
         raise AssertionError("app should not be called")
+
     middleware = RequestSizeLimitMiddleware(inner_app)
     scope = {"type": "http", "http_version": "1.1", "headers": [(b"content-length", b"not-a-number")], "method": "POST", "path": "/test"}
     asyncio.run(middleware(scope, receive, send))
     assert messages[0]["status"] == 400
 
 
+
 def test_concurrent_same_idempotency_key_returns_one_order_without_false_stock_conflict(client):
     p = listing(client, title="Single Stock Item", qty=1, price="19.99")
     key = "duplicate-concurrent-order-001"
     payload = {"items": [{"listing_id": p["id"], "quantity": 1}]}
+
     def buy(_):
         return client.post('/orders', headers={"Idempotency-Key": key}, json=payload)
+
     with ThreadPoolExecutor(max_workers=8) as pool:
         responses = list(pool.map(buy, range(8)))
+
+    # SQLite may temporarily return 503 under lock contention, but a retry with
+    # the same key must recover the committed order instead of reporting stock loss.
     assert all(response.status_code in {201, 503} for response in responses)
     recovered = client.post('/orders', headers={"Idempotency-Key": key}, json=payload)
     assert recovered.status_code == 201, recovered.text
@@ -243,6 +261,7 @@ def test_concurrent_same_idempotency_key_returns_one_order_without_false_stock_c
     from marketplace.models import Order
     with client.app.state.session_factory() as db:
         assert db.scalar(select(func.count(Order.id))) == 1
+
 
 
 def test_production_mode_disables_anonymous_inventory_mutation(tmp_path, monkeypatch):

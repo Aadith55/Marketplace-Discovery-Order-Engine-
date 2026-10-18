@@ -4,10 +4,13 @@ from decimal import Decimal
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+
 Condition = Literal["new", "used", "refurbished"]
+
 
 class ListingCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=3, max_length=160)
     description: str = Field(default="", max_length=4000)
     category: str = Field(min_length=2, max_length=80)
@@ -40,6 +43,7 @@ class ListingCreate(BaseModel):
             raise ValueError("must contain at least 2 non-whitespace characters")
         return value
 
+
 class ListingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -55,17 +59,23 @@ class ListingOut(BaseModel):
     @field_validator("created_at")
     @classmethod
     def created_at_is_utc(cls, value: datetime) -> datetime:
+        # SQLite drops timezone metadata for DateTime columns; normalize its
+        # naive values to UTC so the API contract stays consistent across DBs.
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+
 class OrderLineIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
     listing_id: int = Field(gt=0)
     quantity: int = Field(ge=1, le=1000)
 
+
 class OrderCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
     items: list[OrderLineIn] = Field(min_length=1, max_length=50)
 
     @field_validator("items")
@@ -76,12 +86,14 @@ class OrderCreate(BaseModel):
             raise ValueError("Each listing may appear once; combine its quantities")
         return items
 
+
 class OrderItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     listing_id: int
     title_snapshot: str
     quantity: int
     unit_price: Decimal
+
 
 class OrderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -97,6 +109,7 @@ class OrderOut(BaseModel):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
 
 class HealthOut(BaseModel):
     status: str

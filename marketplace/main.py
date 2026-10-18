@@ -3,6 +3,7 @@
 A portfolio-scale service demonstrating API design, query filtering, SQL data
 modeling, inventory-safe checkout, and idempotent request handling.
 """
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -53,7 +54,15 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
         finally:
             db.close()
 
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            engine.dispose()
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Marketplace Discovery & Order Engine",
         version="1.0.0",
         description=(
@@ -66,10 +75,11 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
     app.state.engine = engine
     app.state.session_factory = SessionLocal
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=1_048_576)
-    app.add_event_handler("shutdown", engine.dispose)
+    # Ensure pooled connections are returned when a TestClient/server shuts down.
 
     @app.exception_handler(OperationalError)
     async def handle_database_operational_error(request: Request, exc: OperationalError):
+        # Never expose connection strings or low-level database messages to clients.
         logger.warning("Database operation failed on %s: %s", request.url.path, type(exc).__name__)
         return JSONResponse(
             status_code=503,
@@ -88,6 +98,7 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
 
         admin_dependencies = [Depends(require_admin)]
     else:
+        # No auth in local demo mode; production mode is rejected at startup above.
         admin_dependencies = []
 
     @app.get("/", include_in_schema=False)
@@ -145,6 +156,7 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
                 Listing.description.ilike(needle, escape="\\"),
             ))
         if category:
+            # Category is a label, not a pattern. Avoid wildcard matching here.
             stmt = stmt.where(func.lower(Listing.category) == category.lower())
         if min_price is not None:
             stmt = stmt.where(Listing.price >= min_price)
@@ -157,6 +169,7 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
         elif sort == "newest":
             stmt = stmt.order_by(Listing.created_at.desc(), Listing.id.desc())
         elif q:
+            # Exact-title/partial-title matches rank ahead of description matches.
             title_match = case((Listing.title.ilike(f"%{_escape_like_literal(q)}%", escape="\\"), 0), else_=1)
             stmt = stmt.order_by(title_match.asc(), Listing.created_at.desc(), Listing.id.desc())
         else:
@@ -176,6 +189,9 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
         db: DB,
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)],
     ):
+        # This prototype has no buyer identity, payment authorization, or
+        # per-user order permissions. Fail closed instead of exposing anonymous
+        # inventory-mutating checkout in production mode.
         if is_production:
             raise HTTPException(
                 status_code=503,
@@ -185,6 +201,7 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
         if not 8 <= len(idempotency_key) <= 128:
             raise HTTPException(status_code=422, detail="Idempotency-Key must contain 8 to 128 non-whitespace characters")
 
+        # Canonical fingerprint makes retries safe and detects accidental key reuse.
         normalized = sorted(
             [{"listing_id": item.listing_id, "quantity": item.quantity} for item in payload.items],
             key=lambda row: row["listing_id"],
@@ -199,6 +216,8 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
         order_lines = []
         total = Decimal("0.00")
         try:
+            # Calculate the complete order total before mutating inventory. This
+            # prevents overflow beyond Numeric(12, 2) and avoids unnecessary writes.
             requested_ids = [item.listing_id for item in payload.items]
             listings_by_id = {
                 listing.id: listing
@@ -214,6 +233,10 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
             if total > MAX_ORDER_TOTAL:
                 raise HTTPException(status_code=422, detail="Order total exceeds the supported maximum")
 
+            # Build the order and flush its unique idempotency key before touching
+            # inventory. Concurrent retries with the same key then contend on the
+            # unique constraint first, rather than incorrectly losing to an
+            # inventory check after the first request has already succeeded.
             for requested in sorted(payload.items, key=lambda line: line.listing_id):
                 listing = listings_by_id[requested.listing_id]
                 order_lines.append(
@@ -232,8 +255,10 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
                 items=order_lines,
             )
             db.add(order)
-            db.flush()
+            db.flush()  # The uniqueness claim and stock changes share one transaction.
 
+            # Conditional updates ensure stock cannot be decremented below zero.
+            # A later failure rolls back the order record and prior stock decrements.
             for requested in sorted(payload.items, key=lambda line: line.listing_id):
                 result = db.execute(
                     update(Listing)
@@ -250,12 +275,16 @@ def create_app(database_url: str = DEFAULT_DB, admin_api_token: str | None = Non
             raise
         except IntegrityError:
             db.rollback()
+            # Defensive response if concurrent callers race to reserve the same key.
             existing = db.scalar(select(Order).where(Order.idempotency_key == idempotency_key))
             if existing and existing.request_fingerprint == fingerprint:
                 return existing
             raise HTTPException(status_code=409, detail="Could not confirm order; retry with the same Idempotency-Key")
         except OperationalError as exc:
             db.rollback()
+            # SQLite can be temporarily locked under concurrent checkout; some
+            # networked databases can also fail transiently. A retry with the
+            # same key is safe even if the client did not receive the response.
             logger.warning("Transient database error during checkout: %s", type(exc).__name__)
             raise HTTPException(
                 status_code=503,

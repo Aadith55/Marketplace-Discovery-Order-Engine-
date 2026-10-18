@@ -11,6 +11,7 @@ SAMPLES = [
     {"title": "Refurbished Smart Watch", "description": "Refurbished smartwatch with charging cable", "category": "Electronics", "seller": "device_cycle", "item_condition": "refurbished", "price": "71.25", "quantity": 4},
     {"title": "First Edition Sci-Fi Hardcover", "description": "Collector hardcover in good condition", "category": "Books", "seller": "paper_moon", "item_condition": "used", "price": "35.00", "quantity": 2},
 ]
+
 factory = app.state.session_factory
 with factory() as db:
     if db.scalar(select(Listing.id).limit(1)) is None:
